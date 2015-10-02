@@ -245,7 +245,7 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 		addOrUpdateEntry(*senderAddress, *senderPort, *heartbeat);//OK.
 
 		Address destinationAddr = getAddress(*senderAddress, *senderPort);
-		//2.2 - Create message tạo ra gói JOINREP vì trong hàng đợi lúc này ko có gói JOINREP
+		//2.2 - Create message
 		MessageHdr *msg;
 		size_t msgsize = sizeof(MessageHdr) 	//4 bytes: Msg Type
 																										   					+ sizeof(destinationAddr.addr) //6 bytes: own address
@@ -271,6 +271,51 @@ bool MP1Node::recvCallBack(void *env, char *data, int size ) {
 		printMemberListTable();
 
 	}
+
+	else if (*msgType == JOINREP || *msgType == DUMMYLASTMSGTYPE){
+		memberNode->inGroup = true;
+		//1 Read Message headers:
+		int offset = sizeof(int);
+		int *senderAddress = (int *) (data+offset);
+		offset += sizeof(int);
+
+		short *senderPort = (short *)(data+offset);
+		offset += sizeof(short) + 1; //includes 1 byte pad
+
+		long *heartbeat = (long *)(data+offset);
+		offset += sizeof(long);
+		addOrUpdateEntry(*senderAddress, *senderPort, *heartbeat);
+
+		int *numberElements = (int *) (data+offset);
+		offset += sizeof(int);
+
+		if (*msgType == JOINREP)
+			;
+		//printf("JoinREP: From: %d:%x. Heartbeat:%lu, Elements:%d\n", *senderAddress, *senderPort, *heartbeat, *numberElements);
+		//if (*msgType == HEARTBEAT)
+			;//printf("Heartbeat: From: %d:%x. Heartbeat:%lu, Elements:%d\n", *senderAddress, *senderPort, *heartbeat, *numberElements);
+
+
+		//2 read content of member list
+		for (int i = 0; i < *numberElements; i++){
+
+			int *id = (int *) (data + offset);
+			offset += sizeof(int);
+			short *port = (short *) (data + offset);
+			offset += sizeof(short);
+			long *hb = (long *) (data + offset);
+			offset += sizeof(long);
+			//	printf("\tJoinREP Loop %d - %d:%x. Heartbeat:%lu\n", i, *id, *port, *hb);
+
+			addOrUpdateEntry(*id, *port, *hb);
+		}
+
+
+	}
+	else {
+		printf("Received an unknown kind of message. Ignoring.\n");
+	}
+	
 			
 }
 /**
@@ -420,6 +465,65 @@ void MP1Node::nodeLoopOps() {
 	/*
 	 * Your code goes here
 	 */
+	for (int i = 0; i < memberNode->memberList.size();i++){
+		int id = memberNode->memberList.at(i).id;
+		short port = memberNode->memberList.at(i).port;
+		long lastHb = memberNode->memberList.at(i).heartbeat;
+		long timestamp = memberNode->memberList.at(i).timestamp;
+
+		long diff = memberNode->heartbeat - timestamp;
+		//printf("checking life.. %d:%x .. diff is: %lu \n" , id, port, diff);
+
+		if (lastHb != -1 && diff > TREMOVE + TFAIL){
+			printf("Removing %d:%x .. diff was: %lu " , id, port, diff);
+			Address currAddr = getAddress(id,port);
+			memberNode->memberList.at(i).setheartbeat(-1);
+			log->logNodeRemove(&memberNode->addr, &currAddr);
+		}
+
+
+
+	}
+
+
+
+	//send a heartbeat and propagate memberlist pigbacked
+
+	MessageHdr *msg;
+	size_t msgsize = sizeof(MessageHdr) + sizeof(memberNode->addr)																		+ 1 + sizeof(long) + sizeof(int) +  memberNode->memberList.size()*14 ;
+	msg = (MessageHdr *) malloc(msgsize * sizeof(char));
+
+	// 4 bytes: Type:
+	msg->msgType = DUMMYLASTMSGTYPE;
+
+	// 6 bytes: address
+	memcpy((char *)(msg+1), &memberNode->addr.addr, sizeof(memberNode->addr.addr));
+
+	//8 bytes: heartbeat + 1 byte padding
+	memcpy((char *)(msg+1) + 1 + sizeof(memberNode->addr.addr), &memberNode->heartbeat, sizeof(long));
+
+	int currentOffset = 4+1+ sizeof(memberNode->addr.addr) + sizeof(long);
+	char *ptr = ((char*) msg + currentOffset);
+	writeMemberListTable(ptr);
+
+
+
+	//broadcast
+	for (int i = 0; i < memberNode->memberList.size();i++){
+		Address *destinationAddr;
+		destinationAddr = (Address *) malloc(1 * sizeof(Address));
+		int id = memberNode->memberList.at(i).id;
+		short port = memberNode->memberList.at(i).port;
+
+		memcpy((char *)(destinationAddr->addr), &id, sizeof(int));
+		memcpy((char *)(destinationAddr->addr+sizeof(int)), &port, sizeof(short));
+
+
+		emulNet->ENsend(&memberNode->addr, destinationAddr, (char *)msg, msgsize);
+		free (destinationAddr);
+
+	}
+	free (msg);
     return;
 }
 
